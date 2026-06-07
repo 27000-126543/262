@@ -580,3 +580,79 @@ export const authenticate = (username: string, password: string): User | null =>
 };
 
 export const generateMockId = generateId;
+
+export interface TideData {
+  time: string;
+  height: number;
+  type: 'high' | 'low';
+}
+
+export interface BerthInfo {
+  id: string;
+  berthNo: string;
+  name: string;
+  length: number;
+  maxDraft: number;
+  status: 'available' | 'occupied' | 'scheduled' | 'maintenance';
+  currentVessel?: string;
+  availableFrom?: string;
+  cranes: string[];
+}
+
+export const mockTideData: TideData[] = Array.from({ length: 24 }, (_, i) => ({
+  time: dayjs().hour(i).minute(0).format('YYYY-MM-DD HH:mm'),
+  height: 8 + Math.sin((i - 6) * Math.PI / 6) * 3 + Math.random() * 0.5,
+  type: i >= 6 && i <= 18 ? 'high' : 'low',
+}));
+
+export const mockBerthInfos: BerthInfo[] = [
+  { id: 'berth1', berthNo: 'B1', name: '1号泊位', length: 400, maxDraft: 16.5, status: 'scheduled', currentVessel: '中远上海', availableFrom: dayjs().add(3, 'day').format('YYYY-MM-DD HH:mm'), cranes: ['QC01', 'QC02', 'QC03'] },
+  { id: 'berth2', berthNo: 'B2', name: '2号泊位', length: 380, maxDraft: 15.5, status: 'occupied', currentVessel: '中海金星', availableFrom: dayjs().add(1, 'day').format('YYYY-MM-DD HH:mm'), cranes: ['QC01', 'QC02'] },
+  { id: 'berth3', berthNo: 'B3', name: '3号泊位', length: 420, maxDraft: 17.0, status: 'scheduled', currentVessel: '达飞泰姬陵', availableFrom: dayjs().add(6, 'day').format('YYYY-MM-DD HH:mm'), cranes: ['QC04', 'QC05', 'QC06'] },
+  { id: 'berth4', berthNo: 'B4', name: '4号泊位', length: 360, maxDraft: 15.0, status: 'available', cranes: ['QC07', 'QC08'] },
+  { id: 'berth5', berthNo: 'B5', name: '5号泊位', length: 350, maxDraft: 14.5, status: 'maintenance', cranes: ['QC09'] },
+  { id: 'berth6', berthNo: 'B6', name: '6号泊位', length: 400, maxDraft: 16.0, status: 'available', cranes: ['QC10', 'QC11', 'QC12'] },
+];
+
+export interface YardInstruction {
+  id: string;
+  containerNo: string;
+  yardBlock: string;
+  yardSlot: string;
+  equipment: string;
+  operator: string;
+  status: 'pending' | 'in-progress' | 'completed';
+  createTime: string;
+}
+
+export const mockYardInstructions: YardInstruction[] = [
+  { id: 'yi1', containerNo: 'MSKU1234567', yardBlock: 'A1', yardSlot: '01-02-03', equipment: 'RT01', operator: '王司机', status: 'completed', createTime: dayjs().subtract(2, 'day').format('YYYY-MM-DD HH:mm') },
+  { id: 'yi2', containerNo: 'COSU7654321', yardBlock: 'A1', yardSlot: '01-03-02', equipment: 'RT02', operator: '李司机', status: 'completed', createTime: dayjs().subtract(1, 'day').format('YYYY-MM-DD HH:mm') },
+];
+
+export interface TimeSlot {
+  slot: string;
+  available: number;
+  total: number;
+  busyLevel: 'low' | 'medium' | 'high';
+  recommended: boolean;
+}
+
+export const generateTimeSlots = (): TimeSlot[] => {
+  const slots = ['08:00-10:00', '10:00-12:00', '12:00-14:00', '14:00-16:00', '16:00-18:00', '18:00-20:00'];
+  return slots.map((slot, index) => {
+    const available = Math.floor(Math.random() * 10) + 2;
+    const total = 15;
+    const ratio = 1 - available / total;
+    let busyLevel: 'low' | 'medium' | 'high' = 'low';
+    if (ratio > 0.7) busyLevel = 'high';
+    else if (ratio > 0.4) busyLevel = 'medium';
+    return {
+      slot,
+      available,
+      total,
+      busyLevel,
+      recommended: index === 3,
+    };
+  });
+};
