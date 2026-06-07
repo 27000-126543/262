@@ -1,24 +1,18 @@
-import React, { useState } from 'react';
-import { Card, Row, Col, Table, Tag, Select, DatePicker, Space, Button, Modal, Form, Input, InputNumber, Timeline, Alert, Divider, List } from 'antd';
+
+import React, { useState, useMemo } from 'react';
+import { Card, Row, Col, Table, Tag, Select, DatePicker, Space, Button, Modal, Form, Input, Alert, Divider, List, Progress, Tooltip, Badge, Statistic } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import { mockBerthInfos, mockBerthPlans, mockTideData, mockForecasts, mockVessels } from '@/services/mockData';
 import { formatDateTime, getStatusColor, getStatusText } from '@/utils/format';
 import { IconMap } from '@/components/IconMap';
+import { calculateBerthRecommendation, formatScoreDetail, DEFAULT_PARAMS } from '@/utils/berthRecommendation';
 import type { BerthPlan, VesselForecast } from '@/types';
+import type { RecommendOption } from '@/utils/berthRecommendation';
 
 const { RangePicker } = DatePicker;
 const { Option } = Select;
 const { TextArea } = Input;
-
-interface RecommendOption {
-  berthNo: string;
-  berthName: string;
-  recommendTime: string;
-  score: number;
-  reason: string;
-  tideHeight: number;
-}
 
 const BerthPlanPage: React.FC = () => {
   const [berthPlans, setBerthPlans] = useState<BerthPlan[]>(mockBerthPlans);
@@ -26,7 +20,13 @@ const BerthPlanPage: React.FC = () => {
   const [selectedForecast, setSelectedForecast] = useState<VesselForecast | null>(null);
   const [recommendations, setRecommendations] = useState<RecommendOption[]>([]);
   const [selectedRecommend, setSelectedRecommend] = useState<RecommendOption | null>(null);
+  const [isCalculating, setIsCalculating] = useState(false);
   const [form] = Form.useForm();
+
+  const selectedVessel = useMemo(() => {
+    if (!selectedForecast) return null;
+    return mockVessels.find((v) => v.id === selectedForecast.vesselId) || null;
+  }, [selectedForecast]);
 
   const tideOption = {
     tooltip: { trigger: 'axis' },
@@ -100,52 +100,39 @@ const BerthPlanPage: React.FC = () => {
     },
   ];
 
-  const generateRecommendations = (forecast: VesselForecast) => {
-    const vessel = mockVessels.find((v) => v.id === forecast.vesselId);
-    if (!vessel) return;
-
-    const options: RecommendOption[] = [];
-    mockBerthInfos.forEach((berth) => {
-      if (berth.status === 'maintenance') return;
-      if (berth.length < vessel.length) return;
-      if (berth.maxDraft < vessel.draft) return;
-
-      const availableTime = berth.availableFrom ? dayjs(berth.availableFrom) : dayjs();
-      const etaTime = dayjs(forecast.eta);
-
-      for (let offset = 0; offset < 48; offset += 6) {
-        const checkTime = availableTime.isAfter(etaTime) ? availableTime.add(offset, 'hour') : etaTime.add(offset, 'hour');
-        const hourIdx = checkTime.hour();
-        const tide = mockTideData[hourIdx];
-
-        if (tide && tide.height >= 12) {
-          const score = Math.round((tide.height / vessel.draft) * 50 + (1 - offset / 48) * 50);
-          options.push({
-            berthNo: berth.berthNo,
-            berthName: berth.name,
-            recommendTime: checkTime.format('YYYY-MM-DD HH:mm'),
-            score,
-            reason: `潮高${tide.height.toFixed(1)}m，满足吃水要求，泊位${berth.length}m适配船长${vessel.length}m`,
-            tideHeight: tide.height,
-          });
-        }
-      }
-    });
-
-    options.sort((a, b) => b.score - a.score);
-    setRecommendations(options.slice(0, 5));
-  };
-
   const handleCreatePlan = () => {
     setIsModalOpen(true);
+    setRecommendations([]);
+    setSelectedRecommend(null);
+    setSelectedForecast(null);
+    form.resetFields();
   };
 
-  const handleForecastSelect = (forecastId: string) => {
+  const handleForecastSelect = async (forecastId: string) => {
     const forecast = mockForecasts.find((f) => f.id === forecastId);
-    if (forecast) {
-      setSelectedForecast(forecast);
-      generateRecommendations(forecast);
+    if (!forecast) return;
+
+    setSelectedForecast(forecast);
+    setIsCalculating(true);
+    setRecommendations([]);
+    setSelectedRecommend(null);
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const vessel = mockVessels.find((v) => v.id === forecast.vesselId);
+    if (vessel) {
+      const results = calculateBerthRecommendation(
+        vessel,
+        forecast,
+        mockBerthInfos,
+        berthPlans,
+        mockTideData,
+        DEFAULT_PARAMS
+      );
+      setRecommendations(results);
     }
+
+    setIsCalculating(false);
   };
 
   const handleRecommendSelect = (rec: RecommendOption) => {
@@ -158,23 +145,38 @@ const BerthPlanPage: React.FC = () => {
 
   const handleSubmit = () => {
     form.validateFields().then((values) => {
+      if (!selectedForecast) return;
+
+      const vessel = mockVessels.find((v) => v.id === selectedForecast.vesselId);
+      const totalTEU = selectedForecast.teuIn + selectedForecast.teuOut;
+      const craneCount = vessel && vessel.teu > 15000 ? 4 : vessel && vessel.teu > 10000 ? 3 : 2;
+      const cranes = Array.from({ length: craneCount }, (_, i) => `QC${String(i + 1).padStart(2, '0')}`);
+
       const newPlan: BerthPlan = {
         id: `bp${Date.now()}`,
-        vesselId: selectedForecast?.vesselId || '',
-        vesselName: selectedForecast?.vesselName || '',
+        vesselId: selectedForecast.vesselId,
+        vesselName: selectedForecast.vesselName,
         berthNo: values.berthNo,
         berthTime: dayjs(values.berthTime).format('YYYY-MM-DD HH:mm'),
-        departureTime: dayjs(values.berthTime).add(48, 'hour').format('YYYY-MM-DD HH:mm'),
+        departureTime: dayjs(values.berthTime).add(totalTEU > 5000 ? 48 : 36, 'hour').format('YYYY-MM-DD HH:mm'),
         status: 'scheduled',
         operationType: '装卸作业',
-        craneAssigned: ['QC01', 'QC02'],
+        craneAssigned: cranes,
       };
+
       setBerthPlans([newPlan, ...berthPlans]);
       setIsModalOpen(false);
       setSelectedForecast(null);
       setSelectedRecommend(null);
       form.resetFields();
     });
+  };
+
+  const getScoreColor = (score: number) => {
+    if (score >= 80) return '#2EC4B6';
+    if (score >= 60) return '#3E92CC';
+    if (score >= 40) return '#FF6B35';
+    return '#EF4444';
   };
 
   return (
@@ -190,8 +192,62 @@ const BerthPlanPage: React.FC = () => {
       </div>
 
       <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} lg={6}>
+          <Card className="border-0 shadow-sm">
+            <Statistic
+              title="泊位利用率"
+              value={76.5}
+              suffix="%"
+              valueStyle={{ color: '#0A2463' }}
+              prefix={<IconMap name="Anchor" size={20} />}
+            />
+            <Progress percent={76.5} strokeColor="#3E92CC" showInfo={false} className="mt-3" />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <Card className="border-0 shadow-sm">
+            <Statistic
+              title="在港船舶"
+              value={2}
+              suffix="艘"
+              valueStyle={{ color: '#2EC4B6' }}
+              prefix={<IconMap name="Ship" size={20} />}
+            />
+            <p className="mt-2 text-sm text-gray-500">计划内: {berthPlans.filter((p) => p.status === 'scheduled').length} 艘</p>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <Card className="border-0 shadow-sm">
+            <Statistic
+              title="今日作业量"
+              value={3280}
+              suffix="TEU"
+              valueStyle={{ color: '#FF6B35' }}
+              prefix={<IconMap name="Package" size={20} />}
+            />
+            <p className="mt-2 text-sm text-emerald-600">
+              <IconMap name="TrendingUp" size={14} className="mr-1 inline" />
+              较昨日 +8.2%
+            </p>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <Card className="border-0 shadow-sm">
+            <Statistic
+              title="待排预报"
+              value={mockForecasts.filter((f) => f.status === 'approved' && !f.recommendedBerth).length}
+              suffix="条"
+              valueStyle={{ color: '#8B5CF6' }}
+              prefix={<IconMap name="Clock" size={20} />}
+            />
+            <p className="mt-2 text-sm text-gray-500">等待生成泊位计划</p>
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
         <Col xs={24} lg={16}>
-          <Card title="24小时潮汐预报" className="border-0 shadow-sm">
+          <Card title="24小时潮汐预报" className="border-0 shadow-sm" extra={<Tag color="blue">实时数据</Tag>}>
             <ReactECharts option={tideOption} style={{ height: 280 }} />
           </Card>
         </Col>
@@ -199,13 +255,16 @@ const BerthPlanPage: React.FC = () => {
           <Card title="泊位状态概览" className="border-0 shadow-sm">
             <div className="space-y-3">
               {mockBerthInfos.map((berth) => (
-                <div key={berth.id} className="flex items-center justify-between rounded-lg border border-gray-100 p-3">
+                <div key={berth.id} className="flex items-center justify-between rounded-lg border border-gray-100 p-3 transition-colors hover:bg-gray-50">
                   <div>
                     <p className="font-medium text-gray-800">{berth.name}</p>
                     <p className="text-xs text-gray-500">长{berth.length}m · 水深{berth.maxDraft}m</p>
+                    {berth.currentVessel && berth.status !== 'available' && (
+                      <p className="text-xs text-[#3E92CC]">{berth.currentVessel}</p>
+                    )}
                   </div>
-                  <Tag
-                    color={
+                  <Badge
+                    status={
                       berth.status === 'available'
                         ? 'success'
                         : berth.status === 'occupied'
@@ -214,15 +273,16 @@ const BerthPlanPage: React.FC = () => {
                         ? 'processing'
                         : 'error'
                     }
-                  >
-                    {berth.status === 'available'
-                      ? '空闲'
-                      : berth.status === 'occupied'
-                      ? '作业中'
-                      : berth.status === 'scheduled'
-                      ? '已排程'
-                      : '维护中'}
-                  </Tag>
+                    text={
+                      berth.status === 'available'
+                        ? '空闲'
+                        : berth.status === 'occupied'
+                        ? '作业中'
+                        : berth.status === 'scheduled'
+                        ? '已排程'
+                        : '维护中'
+                    }
+                  />
                 </div>
               ))}
             </div>
@@ -259,15 +319,16 @@ const BerthPlanPage: React.FC = () => {
           form.resetFields();
         }}
         onOk={handleSubmit}
-        width={900}
+        width={1000}
         okText="确认生成"
         cancelText="取消"
+        confirmLoading={isCalculating}
       >
         <Form form={form} layout="vertical">
           <Row gutter={[16, 16]}>
             <Col xs={24} md={12}>
               <Form.Item label="选择到港预报" name="forecastId" rules={[{ required: true, message: '请选择到港预报' }]}>
-                <Select placeholder="请选择到港预报" onChange={handleForecastSelect}>
+                <Select placeholder="请选择到港预报" onChange={handleForecastSelect} loading={isCalculating}>
                   {mockForecasts
                     .filter((f) => f.status === 'approved')
                     .map((f) => (
@@ -303,16 +364,54 @@ const BerthPlanPage: React.FC = () => {
             </Col>
           </Row>
 
-          {recommendations.length > 0 && (
+          {selectedForecast && selectedVessel && (
+            <Card size="small" className="mb-4 border-0 bg-blue-50">
+              <Row gutter={[16, 8]}>
+                <Col xs={12} sm={6}>
+                  <p className="text-xs text-gray-500">船舶名称</p>
+                  <p className="font-bold text-[#0A2463]">{selectedVessel.name}</p>
+                </Col>
+                <Col xs={12} sm={6}>
+                  <p className="text-xs text-gray-500">船长 / 吃水</p>
+                  <p className="font-medium">{selectedVessel.length}m / {selectedVessel.draft}m</p>
+                </Col>
+                <Col xs={12} sm={6}>
+                  <p className="text-xs text-gray-500">装卸箱量</p>
+                  <p className="font-medium">
+                    {selectedForecast.teuIn} / {selectedForecast.teuOut} TEU
+                  </p>
+                </Col>
+                <Col xs={12} sm={6}>
+                  <p className="text-xs text-gray-500">预计到港</p>
+                  <p className="font-medium">{dayjs(selectedForecast.eta).format('MM-DD HH:mm')}</p>
+                </Col>
+              </Row>
+            </Card>
+          )}
+
+          {isCalculating && (
+            <div className="flex h-40 items-center justify-center rounded-lg border-2 border-dashed border-gray-200">
+              <div className="text-center">
+                <div className="mx-auto mb-3 animate-spin">
+                  <IconMap name="Loader" size={32} className="text-[#3E92CC]" />
+                </div>
+                <p className="text-gray-600">正在智能计算最优靠泊方案...</p>
+                <p className="mt-1 text-xs text-gray-400">综合潮汐、泊位、船舶参数进行匹配</p>
+              </div>
+            </div>
+          )}
+
+          {!isCalculating && recommendations.length > 0 && (
             <>
               <Divider orientation="left">
                 <span className="text-base font-medium">
                   <IconMap name="Lightbulb" size={16} className="mr-1 inline text-amber-500" />
                   智能推荐方案
+                  <Tag color="success" className="ml-2">TOP {recommendations.length}</Tag>
                 </span>
               </Divider>
               <Alert
-                message="系统根据潮汐数据、泊位空闲情况和船舶参数智能推荐以下靠泊方案"
+                message={`系统为"${selectedForecast?.vesselName}"匹配到${recommendations.length}个最优靠泊方案，点击方案可快速填充`}
                 type="info"
                 showIcon
                 className="mb-4"
@@ -320,33 +419,93 @@ const BerthPlanPage: React.FC = () => {
               <List
                 grid={{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3 }}
                 dataSource={recommendations}
-                renderItem={(item) => (
+                renderItem={(item, index) => (
                   <List.Item>
                     <div
                       className={`w-full cursor-pointer rounded-xl border-2 p-4 transition-all ${
                         selectedRecommend?.recommendTime === item.recommendTime
-                          ? 'border-[#3E92CC] bg-blue-50'
-                          : 'border-gray-100 hover:border-blue-200'
+                          ? 'border-[#3E92CC] bg-blue-50 ring-2 ring-blue-200'
+                          : 'border-gray-100 hover:border-blue-200 hover:shadow-md'
                       }`}
                       onClick={() => handleRecommendSelect(item)}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="font-bold text-gray-800">{item.berthName}</span>
-                        <Tag color={item.score > 80 ? 'success' : item.score > 60 ? 'warning' : 'processing'}>
-                          匹配度 {item.score}%
-                        </Tag>
+                        <div className="flex items-center gap-2">
+                          {index === 0 && (
+                            <Badge count="TOP1" className="!rounded-full !bg-amber-500 !text-white" />
+                          )}
+                          <span className="font-bold text-gray-800">{item.berthName}</span>
+                        </div>
+                        <Tooltip title={formatScoreDetail(item.scoreDetail)}>
+                          <span
+                            className="rounded-full px-3 py-1 text-sm font-bold"
+                            style={{
+                              backgroundColor: `${getScoreColor(item.score)}15`,
+                              color: getScoreColor(item.score),
+                            }}
+                          >
+                            {item.score}分
+                          </span>
+                        </Tooltip>
                       </div>
-                      <p className="mt-2 text-sm text-gray-600">
-                        <IconMap name="Clock" size={12} className="mr-1 inline" />
-                        {dayjs(item.recommendTime).format('MM月DD日 HH:mm')}
-                      </p>
-                      <p className="mt-1 text-xs text-gray-500">潮高: {item.tideHeight.toFixed(1)}m</p>
-                      <p className="mt-2 text-xs text-gray-400">{item.reason}</p>
+
+                      <div className="mt-3 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-gray-500">潮高匹配</span>
+                          <Progress
+                            percent={item.scoreDetail.tideScore}
+                            size="small"
+                            strokeColor="#3E92CC"
+                            showInfo={false}
+                            className="w-24"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-gray-500">船长适配</span>
+                          <Progress
+                            percent={item.scoreDetail.lengthScore}
+                            size="small"
+                            strokeColor="#2EC4B6"
+                            showInfo={false}
+                            className="w-24"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-gray-500">吃水适配</span>
+                          <Progress
+                            percent={item.scoreDetail.draftScore}
+                            size="small"
+                            strokeColor="#FF6B35"
+                            showInfo={false}
+                            className="w-24"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="mt-3 border-t border-gray-100 pt-3">
+                        <p className="text-sm text-gray-600">
+                          <IconMap name="Clock" size={12} className="mr-1 inline" />
+                          {dayjs(item.recommendTime).format('MM月DD日 HH:mm')}
+                        </p>
+                        <p className="mt-1 text-xs text-gray-500">
+                          潮高: {item.tideHeight.toFixed(1)}m
+                        </p>
+                        <p className="mt-2 text-xs text-gray-400 line-clamp-2">{item.reason}</p>
+                      </div>
                     </div>
                   </List.Item>
                 )}
               />
             </>
+          )}
+
+          {!isCalculating && selectedForecast && recommendations.length === 0 && (
+            <Alert
+              message="未找到合适的靠泊方案"
+              description="可能由于潮汐条件不满足或泊位全部占用，请调整参数后重试"
+              type="warning"
+              showIcon
+            />
           )}
         </Form>
       </Modal>
