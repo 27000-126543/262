@@ -1,12 +1,13 @@
 
 import React, { useState, useMemo } from 'react';
-import { Card, Row, Col, Table, Tag, Select, DatePicker, Space, Button, Modal, Form, Input, Alert, Divider, List, Progress, Tooltip, Badge, Statistic } from 'antd';
+import { Card, Row, Col, Table, Tag, Select, DatePicker, Space, Button, Modal, Form, Input, Alert, Divider, List, Progress, Tooltip, Badge, Statistic, message } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
-import { mockBerthInfos, mockBerthPlans, mockTideData, mockForecasts, mockVessels } from '@/services/mockData';
+import { mockVessels } from '@/services/mockData';
 import { formatDateTime, getStatusColor, getStatusText } from '@/utils/format';
 import { IconMap } from '@/components/IconMap';
 import { calculateBerthRecommendation, formatScoreDetail, DEFAULT_PARAMS } from '@/utils/berthRecommendation';
+import { useBerthStore } from '@/store/useBerthStore';
 import type { BerthPlan, VesselForecast } from '@/types';
 import type { RecommendOption } from '@/utils/berthRecommendation';
 
@@ -15,7 +16,7 @@ const { Option } = Select;
 const { TextArea } = Input;
 
 const BerthPlanPage: React.FC = () => {
-  const [berthPlans, setBerthPlans] = useState<BerthPlan[]>(mockBerthPlans);
+  const { tideData, berthInfos, berthPlans, forecasts, addBerthPlan, generateTideData } = useBerthStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedForecast, setSelectedForecast] = useState<VesselForecast | null>(null);
   const [recommendations, setRecommendations] = useState<RecommendOption[]>([]);
@@ -28,12 +29,22 @@ const BerthPlanPage: React.FC = () => {
     return mockVessels.find((v) => v.id === selectedForecast.vesselId) || null;
   }, [selectedForecast]);
 
-  const tideOption = {
+  const statistics = useMemo(() => {
+    const utilization = Math.round(
+      (berthInfos.filter((b) => b.status === 'occupied' || b.status === 'scheduled').length / berthInfos.length) * 1000
+    ) / 10;
+    const inPort = berthInfos.filter((b) => b.status === 'occupied').length;
+    const scheduled = berthPlans.filter((p) => p.status === 'scheduled').length;
+    const pendingForecasts = forecasts.filter((f) => f.status === 'approved' && !f.recommendedBerth).length;
+    return { utilization, inPort, scheduled, pendingForecasts };
+  }, [berthInfos, berthPlans, forecasts]);
+
+  const tideOption = useMemo(() => ({
     tooltip: { trigger: 'axis' },
     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
     xAxis: {
       type: 'category',
-      data: mockTideData.map((t) => dayjs(t.time).format('HH:mm')),
+      data: tideData.map((t) => dayjs(t.time).format('HH:mm')),
       axisLabel: { rotate: 45 },
     },
     yAxis: {
@@ -47,7 +58,7 @@ const BerthPlanPage: React.FC = () => {
         name: '潮高',
         type: 'line',
         smooth: true,
-        data: mockTideData.map((t) => t.height.toFixed(1)),
+        data: tideData.map((t) => t.height.toFixed(1)),
         areaStyle: { color: 'rgba(62, 146, 204, 0.3)' },
         lineStyle: { color: '#3E92CC', width: 3 },
         itemStyle: { color: '#3E92CC' },
@@ -56,14 +67,14 @@ const BerthPlanPage: React.FC = () => {
         },
       },
     ],
-  };
+  }), [tideData]);
 
   const columns = [
     {
       title: '船舶名称',
       dataIndex: 'vesselName',
       key: 'vesselName',
-      render: (text: string, record: any) => (
+      render: (text: string) => (
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100">
             <IconMap name="Ship" size={16} className="text-[#3E92CC]" />
@@ -109,7 +120,7 @@ const BerthPlanPage: React.FC = () => {
   };
 
   const handleForecastSelect = async (forecastId: string) => {
-    const forecast = mockForecasts.find((f) => f.id === forecastId);
+    const forecast = forecasts.find((f) => f.id === forecastId);
     if (!forecast) return;
 
     setSelectedForecast(forecast);
@@ -124,12 +135,17 @@ const BerthPlanPage: React.FC = () => {
       const results = calculateBerthRecommendation(
         vessel,
         forecast,
-        mockBerthInfos,
+        berthInfos,
         berthPlans,
-        mockTideData,
+        tideData,
         DEFAULT_PARAMS
       );
       setRecommendations(results);
+      if (results.length > 0) {
+        message.success(`已为${vessel.name}匹配到${results.length}个最优靠泊方案`);
+      } else {
+        message.warning('未找到合适的靠泊方案，请检查潮汐或泊位情况');
+      }
     }
 
     setIsCalculating(false);
@@ -141,16 +157,21 @@ const BerthPlanPage: React.FC = () => {
       berthNo: rec.berthNo,
       berthTime: dayjs(rec.recommendTime),
     });
+    message.info(`已选择${rec.berthName}，匹配度${rec.score}分`);
   };
 
   const handleSubmit = () => {
     form.validateFields().then((values) => {
-      if (!selectedForecast) return;
+      if (!selectedForecast) {
+        message.error('请先选择到港预报');
+        return;
+      }
 
       const vessel = mockVessels.find((v) => v.id === selectedForecast.vesselId);
       const totalTEU = selectedForecast.teuIn + selectedForecast.teuOut;
       const craneCount = vessel && vessel.teu > 15000 ? 4 : vessel && vessel.teu > 10000 ? 3 : 2;
       const cranes = Array.from({ length: craneCount }, (_, i) => `QC${String(i + 1).padStart(2, '0')}`);
+      const operationHours = totalTEU > 5000 ? 48 : 36;
 
       const newPlan: BerthPlan = {
         id: `bp${Date.now()}`,
@@ -158,13 +179,15 @@ const BerthPlanPage: React.FC = () => {
         vesselName: selectedForecast.vesselName,
         berthNo: values.berthNo,
         berthTime: dayjs(values.berthTime).format('YYYY-MM-DD HH:mm'),
-        departureTime: dayjs(values.berthTime).add(totalTEU > 5000 ? 48 : 36, 'hour').format('YYYY-MM-DD HH:mm'),
+        departureTime: dayjs(values.berthTime).add(operationHours, 'hour').format('YYYY-MM-DD HH:mm'),
         status: 'scheduled',
         operationType: '装卸作业',
         craneAssigned: cranes,
       };
 
-      setBerthPlans([newPlan, ...berthPlans]);
+      addBerthPlan(newPlan);
+      message.success(`${selectedForecast.vesselName} 泊位计划已生成并保存！`);
+
       setIsModalOpen(false);
       setSelectedForecast(null);
       setSelectedRecommend(null);
@@ -186,38 +209,43 @@ const BerthPlanPage: React.FC = () => {
           <h1 className="text-2xl font-bold text-gray-800">泊位计划</h1>
           <p className="mt-1 text-gray-500">智能推荐最优靠泊时间，生成泊位计划</p>
         </div>
-        <Button type="primary" icon={<IconMap name="Plus" size={16} />} onClick={handleCreatePlan}>
-          生成泊位计划
-        </Button>
+        <Space>
+          <Button icon={<IconMap name="RefreshCw" size={16} />} onClick={() => { generateTideData(); message.success('潮汐数据已更新'); }}>
+            刷新潮汐
+          </Button>
+          <Button type="primary" icon={<IconMap name="Plus" size={16} />} onClick={handleCreatePlan}>
+            生成泊位计划
+          </Button>
+        </Space>
       </div>
 
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} lg={6}>
-          <Card className="border-0 shadow-sm">
+          <Card className="border-0 shadow-sm card-hover">
             <Statistic
               title="泊位利用率"
-              value={76.5}
+              value={statistics.utilization}
               suffix="%"
               valueStyle={{ color: '#0A2463' }}
               prefix={<IconMap name="Anchor" size={20} />}
             />
-            <Progress percent={76.5} strokeColor="#3E92CC" showInfo={false} className="mt-3" />
+            <Progress percent={statistics.utilization} strokeColor="#3E92CC" showInfo={false} className="mt-3" />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Card className="border-0 shadow-sm">
+          <Card className="border-0 shadow-sm card-hover">
             <Statistic
               title="在港船舶"
-              value={2}
+              value={statistics.inPort}
               suffix="艘"
               valueStyle={{ color: '#2EC4B6' }}
               prefix={<IconMap name="Ship" size={20} />}
             />
-            <p className="mt-2 text-sm text-gray-500">计划内: {berthPlans.filter((p) => p.status === 'scheduled').length} 艘</p>
+            <p className="mt-2 text-sm text-gray-500">计划内: {statistics.scheduled} 艘</p>
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Card className="border-0 shadow-sm">
+          <Card className="border-0 shadow-sm card-hover">
             <Statistic
               title="今日作业量"
               value={3280}
@@ -232,10 +260,10 @@ const BerthPlanPage: React.FC = () => {
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Card className="border-0 shadow-sm">
+          <Card className="border-0 shadow-sm card-hover">
             <Statistic
               title="待排预报"
-              value={mockForecasts.filter((f) => f.status === 'approved' && !f.recommendedBerth).length}
+              value={statistics.pendingForecasts}
               suffix="条"
               valueStyle={{ color: '#8B5CF6' }}
               prefix={<IconMap name="Clock" size={20} />}
@@ -254,7 +282,7 @@ const BerthPlanPage: React.FC = () => {
         <Col xs={24} lg={8}>
           <Card title="泊位状态概览" className="border-0 shadow-sm">
             <div className="space-y-3">
-              {mockBerthInfos.map((berth) => (
+              {berthInfos.map((berth) => (
                 <div key={berth.id} className="flex items-center justify-between rounded-lg border border-gray-100 p-3 transition-colors hover:bg-gray-50">
                   <div>
                     <p className="font-medium text-gray-800">{berth.name}</p>
@@ -320,7 +348,7 @@ const BerthPlanPage: React.FC = () => {
         }}
         onOk={handleSubmit}
         width={1000}
-        okText="确认生成"
+        okText="确认生成并保存"
         cancelText="取消"
         confirmLoading={isCalculating}
       >
@@ -329,11 +357,12 @@ const BerthPlanPage: React.FC = () => {
             <Col xs={24} md={12}>
               <Form.Item label="选择到港预报" name="forecastId" rules={[{ required: true, message: '请选择到港预报' }]}>
                 <Select placeholder="请选择到港预报" onChange={handleForecastSelect} loading={isCalculating}>
-                  {mockForecasts
+                  {forecasts
                     .filter((f) => f.status === 'approved')
                     .map((f) => (
                       <Option key={f.id} value={f.id}>
                         {f.vesselName} - 预计{dayjs(f.eta).format('MM-DD HH:mm')}到港
+                        {f.recommendedBerth && ` (已排${f.recommendedBerth})`}
                       </Option>
                     ))}
                 </Select>
@@ -342,11 +371,12 @@ const BerthPlanPage: React.FC = () => {
             <Col xs={24} md={12}>
               <Form.Item label="选择泊位" name="berthNo" rules={[{ required: true, message: '请选择泊位' }]}>
                 <Select placeholder="请选择泊位">
-                  {mockBerthInfos
+                  {berthInfos
                     .filter((b) => b.status !== 'maintenance')
                     .map((b) => (
                       <Option key={b.berthNo} value={b.berthNo}>
                         {b.name} - 长{b.length}m/水深{b.maxDraft}m
+                        {b.status === 'occupied' ? ' (作业中)' : b.status === 'scheduled' ? ' (已排程)' : ''}
                       </Option>
                     ))}
                 </Select>
@@ -411,7 +441,7 @@ const BerthPlanPage: React.FC = () => {
                 </span>
               </Divider>
               <Alert
-                message={`系统为"${selectedForecast?.vesselName}"匹配到${recommendations.length}个最优靠泊方案，点击方案可快速填充`}
+                message={`系统为"${selectedForecast?.vesselName}"匹配到${recommendations.length}个最优靠泊方案，点击方案可快速填充表单`}
                 type="info"
                 showIcon
                 className="mb-4"
@@ -432,7 +462,7 @@ const BerthPlanPage: React.FC = () => {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           {index === 0 && (
-                            <Badge count="TOP1" className="!rounded-full !bg-amber-500 !text-white" />
+                            <Badge count="TOP1" className="!rounded-full !bg-amber-500 !text-white !px-2" />
                           )}
                           <span className="font-bold text-gray-800">{item.berthName}</span>
                         </div>
